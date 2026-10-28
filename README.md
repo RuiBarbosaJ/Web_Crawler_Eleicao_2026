@@ -138,3 +138,61 @@ Fluxo usado: branch `melhoria-xp`, um commit por passo do [MELHORIAS.md](MELHORI
 | 8 Todos os municípios | | |
 | 9 Eleitos | | |
 | 10 README | | |
+
+---
+
+## Implementação: tela web
+
+Painel em [frontend/](frontend/) que mostra os resultados do `buscador.sh` com gráficos. O script continua sendo o backend: a tela só o executa e desenha o que ele devolve.
+
+![Tela web do painel de resultados](docs/tela-web.png)
+
+**Tecnologias:** Next.js 16 · React 19 · TypeScript · Tailwind CSS 4 · shadcn/ui · Recharts (gráficos do shadcn)
+
+### Como executar
+
+Pré-requisitos: Node.js 20.9 ou mais novo, além de bash, curl e jq (os mesmos do script).
+
+```bash
+cd frontend
+npm install
+npm run dev      # abre em http://localhost:3000
+```
+
+Para a versão otimizada: `npm run build` e depois `npm start`.
+
+### O que a tela mostra
+
+- Busca entre os 217 municípios do Maranhão, sem precisar de acento (atalho `Ctrl K`).
+- 1º e 2º turno em seções separadas (teclas `1` e `2`). Quando não houve 2º turno para um cargo, a tela avisa.
+- Eleitos destacados em azul com a etiqueta **ELEITO**. Quem foi ao 2º turno aparece em laranja.
+- Comparecimento, abstenção e eleitorado do município.
+- Gráfico de barras por cargo e composição dos votos (válidos, brancos e nulos). Cada gráfico tem uma versão em tabela.
+- Cada cargo aparece assim que o TSE responde, com a varredura do radar mostrando o progresso.
+- A escolha fica na URL (ex.: `?municipio=09210&turno=2`), para compartilhar o link.
+
+### Como a tela usa o script
+
+```text
+navegador ──► /api/municipios ──► buscador.sh  (TSE_RESULTS_MUNICIPALITY=lista)
+          ──► /api/resultados ──► buscador.sh  (TSE_RESULTS_FORMAT=json)
+                                   └─ uma linha JSON por cargo, enviada à tela assim que chega
+```
+
+O `buscador.sh` ganhou só duas opções. O modo tabela do terminal continua igual.
+
+| Variável | Valor novo | Efeito |
+|----------|------------|--------|
+| `TSE_RESULTS_FORMAT` | `json` (padrão `tabela`) | imprime cada cargo como uma linha JSON, com candidatos, percentuais e resumo de votos |
+| `TSE_RESULTS_MUNICIPALITY` | `lista` | imprime `código<TAB>nome` dos municípios e sai |
+
+### Arquivos principais
+
+| Arquivo | Papel |
+|---------|-------|
+| [frontend/src/lib/buscador.ts](frontend/src/lib/buscador.ts) | executa o `buscador.sh` e repassa a saída (cache de 10 min) |
+| [frontend/src/app/api/](frontend/src/app/api/) | rotas `/api/municipios` e `/api/resultados` |
+| [frontend/src/components/painel/](frontend/src/components/painel/) | componentes da tela (cartões, gráficos, busca, carregamento) |
+| [frontend/src/app/globals.css](frontend/src/app/globals.css) | tema escuro, cores dos gráficos e efeitos visuais |
+
+As cores dos gráficos foram conferidas com um validador de paleta para daltonismo e contraste. As animações são desligadas quando o sistema pede menos movimento.
