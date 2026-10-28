@@ -24,6 +24,9 @@ command -v jq >/dev/null || die "jq não encontrado"
 [[ "$COLOR_MODE" =~ ^(auto|always|never)$ ]] || die "TSE_RESULTS_COLOR deve ser auto, always ou never"
 
 UF="${UF,,}"
+# Base 10 explícita: sem isso, "0544" seria lido como octal.
+FEDERAL_ELECTION=$((10#$FEDERAL_ELECTION))
+STATE_ELECTION=$((10#$STATE_ELECTION))
 BASE_URL="${BASE_URL%/}"
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
