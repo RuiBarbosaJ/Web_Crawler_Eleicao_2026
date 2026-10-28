@@ -81,7 +81,10 @@ election_for_cargo() {
   esac
 }
 
-for cargo in "${CARGOS[@]}"; do
+# Consulta um cargo e imprime sua tabela.
+show_cargo() {
+  local cargo="$1" election cargo_padded election_padded url file rows_file cargo_name
+  local -a rows
   election="$(election_for_cargo "$cargo")"
   file="$tmp_dir/cargo-$cargo.json"
   printf -v cargo_padded '%04d' "$cargo"
@@ -111,4 +114,8 @@ for cargo in "${CARGOS[@]}"; do
   ' "$file" >"$rows_file"
   mapfile -t rows <"$rows_file"
   print_table rows
+}
+
+for cargo in "${CARGOS[@]}"; do
+  show_cargo "$cargo"
 done
