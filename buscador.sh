@@ -25,7 +25,7 @@ fail() { warn "$*"; failures=$((failures + 1)); }
 command -v curl >/dev/null || die "curl não encontrado"
 command -v jq >/dev/null || die "jq não encontrado"
 [[ "$UF" =~ ^[[:alpha:]]{2}$ ]] || die "TSE_RESULTS_UF deve conter duas letras"
-[[ "$MUNICIPIO" =~ ^([0-9]{5}|todos)$ ]] || die "TSE_RESULTS_MUNICIPALITY deve ser um código de cinco dígitos ou todos"
+[[ "$MUNICIPIO" =~ ^([0-9]{5}|todos|lista)$ ]] || die "TSE_RESULTS_MUNICIPALITY deve ser um código de cinco dígitos, todos ou lista"
 [[ "$YEAR" =~ ^[0-9]{4}$ ]] || die "TSE_RESULTS_YEAR deve conter quatro dígitos"
 [[ "$LIMIT" =~ ^[1-9][0-9]*$ ]] || die "TSE_RESULTS_LIMIT deve ser um inteiro positivo"
 [[ "$FEDERAL_ELECTION" =~ ^[0-9]+$ && "$STATE_ELECTION" =~ ^[0-9]+$ ]] || die "códigos de eleição devem ser numéricos"
@@ -185,6 +185,10 @@ case "$TURN" in
 esac
 
 load_municipalities >"$tmp_dir/municipios.tsv"
+if [[ "$MUNICIPIO" == lista ]]; then
+  cat "$tmp_dir/municipios.tsv"
+  exit 0
+fi
 if [[ "$MUNICIPIO" != todos ]]; then
   grep "^$MUNICIPIO"$'\t' "$tmp_dir/municipios.tsv" >"$tmp_dir/selecionados.tsv" \
     || die "município $MUNICIPIO não encontrado em ${UF^^}"
