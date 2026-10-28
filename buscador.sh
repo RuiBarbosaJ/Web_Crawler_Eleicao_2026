@@ -17,6 +17,7 @@ FEDERAL_ELECTION_T2="${TSE_RESULTS_FEDERAL_ELECTION_T2:-6258}"
 STATE_ELECTION_T2="${TSE_RESULTS_STATE_ELECTION_T2:-6260}"
 TURN="${TSE_RESULTS_TURN:-ambos}"
 COLOR_MODE="${TSE_RESULTS_COLOR:-auto}"
+FORMAT="${TSE_RESULTS_FORMAT:-tabela}"
 
 die() { printf 'Erro: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'Aviso: %s\n' "$*" >&2; }
@@ -32,6 +33,7 @@ command -v jq >/dev/null || die "jq não encontrado"
 [[ "$FEDERAL_ELECTION_T2" =~ ^[0-9]+$ && "$STATE_ELECTION_T2" =~ ^[0-9]+$ ]] || die "códigos de eleição do 2º turno devem ser numéricos"
 [[ "$TURN" =~ ^(1|2|ambos)$ ]] || die "TSE_RESULTS_TURN deve ser 1, 2 ou ambos"
 [[ "$COLOR_MODE" =~ ^(auto|always|never)$ ]] || die "TSE_RESULTS_COLOR deve ser auto, always ou never"
+[[ "$FORMAT" =~ ^(tabela|json)$ ]] || die "TSE_RESULTS_FORMAT deve ser tabela ou json"
 
 UF="${UF,,}"
 # Base 10 explícita: sem isso, "0544" seria lido como octal.
@@ -93,6 +95,27 @@ print_table() {
 
 readonly name_header="NOME" number_header="NÚMERO" votes_header="VOTOS" status_header="SITUAÇÃO"
 
+# Imprime o cargo como uma linha JSON (TSE_RESULTS_FORMAT=json); é o que a tela em frontend/ lê.
+print_json() {
+  local municipio="$1" municipio_name="$2" turn="$3" cargo="$4" cargo_name="$5" file="$6" rows_file="$7"
+  jq -cRn --arg municipio "$municipio" --arg nome_municipio "$municipio_name" --arg uf "${UF^^}" \
+    --argjson turno "$turn" --argjson cargo "$cargo" --arg nome_cargo "$cargo_name" --slurpfile doc "$file" '
+    def num: (. // "0") | sub(","; ".") | tonumber;
+    $doc[0] as $d
+    | ([$d | .. | objects | .cand? // empty | .[] | select(.n != null) | {key: .n, value: (.pvap | num)}] | from_entries) as $pct
+    | {
+        municipio: $municipio, nome_municipio: $nome_municipio, uf: $uf, turno: $turno, cargo: $cargo, nome_cargo: $nome_cargo,
+        atualizado: "\($d.dg // "") \($d.hg // "")",
+        resumo: {
+          eleitores: ($d.e.te | num), comparecimento: ($d.e.c | num), abstencao: ($d.e.a | num),
+          votos: ($d.v.tv | num), validos: ($d.v.vv | num), brancos: ($d.v.vb | num),
+          nulos: ($d.v.tvn | num), anulados: ($d.v.vansj | num), secoes_totalizadas: ($d.s.pst | num)
+        },
+        candidatos: [inputs | split("\t")
+          | {nome: .[0], numero: .[1], votos: (.[2] | tonumber), percentual: ($pct[.[1]] // 0), situacao: .[3]}]
+      }' <"$rows_file"
+}
+
 # Recebe cargo e turno; devolve o código da eleição.
 election_for_cargo() {
   case "$1-$2" in
@@ -129,7 +152,7 @@ load_municipalities() {
 
 # Consulta um cargo em um turno, em um município, e imprime sua tabela.
 show_cargo() {
-  local municipio="$1" cargo="$2" turn="$3" election cargo_padded election_padded url file rows_file cargo_name status=0
+  local municipio="$1" cargo="$2" turn="$3" municipio_name="$4" election cargo_padded election_padded url file rows_file cargo_name status=0
   local status_file="$tmp_dir/situacao-t$turn-c$cargo.json"
   local -a rows
   election="$(election_for_cargo "$cargo" "$turn")"
@@ -159,7 +182,6 @@ show_cargo() {
   if [[ -z "$cargo_name" ]]; then
     fail "cargo $cargo ausente na resposta"; return 0
   fi
-  printf '\n%s (cargo %s)\n' "$cargo_name" "$cargo"
   rows_file="$tmp_dir/cargo-$cargo.tsv"
   jq -r --arg cargo "$cargo" --argjson limit "$LIMIT" --slurpfile uf "$status_file" '
     ($uf[0] | [.. | objects | .cand? // empty | .[] | select(.n != null) | {key: .n, value: .st}] | from_entries) as $status
@@ -175,6 +197,12 @@ show_cargo() {
     | .[:$limit][]
     | [.nome, .numero, (.votos | tostring), (if .situacao == "" then "-" else .situacao end)] | @tsv
   ' "$file" >"$rows_file" || { fail "não foi possível ler os candidatos do cargo $cargo"; return 0; }
+  if [[ "$FORMAT" == json ]]; then
+    print_json "$municipio" "$municipio_name" "$turn" "$cargo" "$cargo_name" "$file" "$rows_file" \
+      || fail "não foi possível gerar o JSON do cargo $cargo"
+    return 0
+  fi
+  printf '\n%s (cargo %s)\n' "$cargo_name" "$cargo"
   mapfile -t rows <"$rows_file"
   print_table rows
 }
@@ -198,12 +226,16 @@ mapfile -t municipalities <"$tmp_dir/municipios.tsv"
 
 for entry in "${municipalities[@]}"; do
   IFS=$'\t' read -r municipio municipio_name <<<"$entry"
-  printf '\n######## %s (%s) - %s ########\n' "$municipio_name" "$municipio" "${UF^^}"
+  if [[ "$FORMAT" == tabela ]]; then
+    printf '\n######## %s (%s) - %s ########\n' "$municipio_name" "$municipio" "${UF^^}"
+  fi
   for turn in "${turns[@]}"; do
-    printf '\n===== %sº turno =====\n' "$turn"
+    if [[ "$FORMAT" == tabela ]]; then
+      printf '\n===== %sº turno =====\n' "$turn"
+    fi
     if (( turn == 1 )); then cargos=("${CARGOS[@]}"); else cargos=("${CARGOS_T2[@]}"); fi
     for cargo in "${cargos[@]}"; do
-      show_cargo "$municipio" "$cargo" "$turn"
+      show_cargo "$municipio" "$cargo" "$turn" "$municipio_name"
     done
   done
 done
