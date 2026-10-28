@@ -38,6 +38,9 @@ print_rule() {
   printf '+-%*s-+-%*s-+-%*s-+\n' "$name_width" '' "$number_width" '' "$votes_width" '' | tr ' ' '-'
 }
 
+# Completa com espaços contando caracteres; o printf do Bash conta bytes e desalinha nomes com acento.
+pad_right() { printf -v "$1" '%s%*s' "$2" $(( $3 - ${#2} )) ''; }
+
 print_table() {
   local -n table_rows="$1"
   local name_width=${#name_header} number_width=${#number_header} votes_width=${#votes_header}
@@ -55,10 +58,11 @@ print_table() {
   print_rule "$name_width" "$number_width" "$votes_width"
   for row in "${table_rows[@]}"; do
     IFS=$'\t' read -r name number votes <<<"$row"
+    pad_right name "$name" "$name_width"
     if $use_color; then
-      printf '| \033[36m%-*s\033[0m | %*s | \033[32m%*s\033[0m |\n' "$name_width" "$name" "$number_width" "$number" "$votes_width" "$votes"
+      printf '| \033[36m%s\033[0m | %*s | \033[32m%*s\033[0m |\n' "$name" "$number_width" "$number" "$votes_width" "$votes"
     else
-      printf '| %-*s | %*s | %*s |\n' "$name_width" "$name" "$number_width" "$number" "$votes_width" "$votes"
+      printf '| %s | %*s | %*s |\n' "$name" "$number_width" "$number" "$votes_width" "$votes"
     fi
   done
   print_rule "$name_width" "$number_width" "$votes_width"
