@@ -52,8 +52,8 @@ if [[ "$COLOR_MODE" == always ]] || { [[ "$COLOR_MODE" == auto && -t 1 && "${TER
 fi
 
 print_rule() {
-  local name_width="$1" number_width="$2" votes_width="$3"
-  printf '+-%*s-+-%*s-+-%*s-+\n' "$name_width" '' "$number_width" '' "$votes_width" '' | tr ' ' '-'
+  local name_width="$1" number_width="$2" votes_width="$3" status_width="$4"
+  printf '+-%*s-+-%*s-+-%*s-+-%*s-+\n' "$name_width" '' "$number_width" '' "$votes_width" '' "$status_width" '' | tr ' ' '-'
 }
 
 # Completa com espaços contando caracteres; o printf do Bash conta bytes e desalinha nomes com acento.
@@ -61,32 +61,37 @@ pad_right() { printf -v "$1" '%s%*s' "$2" $(( $3 - ${#2} )) ''; }
 
 print_table() {
   local -n table_rows="$1"
-  local name_width=${#name_header} number_width=${#number_header} votes_width=${#votes_header}
-  local row name number votes
+  local name_width=${#name_header} number_width=${#number_header} votes_width=${#votes_header} status_width=${#status_header}
+  local row name number votes status status_title status_color
 
   for row in "${table_rows[@]}"; do
-    IFS=$'\t' read -r name number votes <<<"$row"
+    IFS=$'\t' read -r name number votes status <<<"$row"
     (( ${#name} > name_width )) && name_width=${#name}
     (( ${#number} > number_width )) && number_width=${#number}
     (( ${#votes} > votes_width )) && votes_width=${#votes}
+    (( ${#status} > status_width )) && status_width=${#status}
   done
 
-  print_rule "$name_width" "$number_width" "$votes_width"
-  printf '| %-*s | %*s | %*s |\n' "$name_width" "$name_header" "$number_width" "$number_header" "$votes_width" "$votes_header"
-  print_rule "$name_width" "$number_width" "$votes_width"
+  pad_right status_title "$status_header" "$status_width"
+  print_rule "$name_width" "$number_width" "$votes_width" "$status_width"
+  printf '| %-*s | %*s | %*s | %s |\n' "$name_width" "$name_header" "$number_width" "$number_header" "$votes_width" "$votes_header" "$status_title"
+  print_rule "$name_width" "$number_width" "$votes_width" "$status_width"
   for row in "${table_rows[@]}"; do
-    IFS=$'\t' read -r name number votes <<<"$row"
+    IFS=$'\t' read -r name number votes status <<<"$row"
     pad_right name "$name" "$name_width"
+    status_color='\033[0m'
+    [[ "$status" == Eleito* ]] && status_color='\033[1;33m'
+    pad_right status "$status" "$status_width"
     if $use_color; then
-      printf '| \033[36m%s\033[0m | %*s | \033[32m%*s\033[0m |\n' "$name" "$number_width" "$number" "$votes_width" "$votes"
+      printf '| \033[36m%s\033[0m | %*s | \033[32m%*s\033[0m | %b%s\033[0m |\n' "$name" "$number_width" "$number" "$votes_width" "$votes" "$status_color" "$status"
     else
-      printf '| %s | %*s | %*s |\n' "$name" "$number_width" "$number" "$votes_width" "$votes"
+      printf '| %s | %*s | %*s | %s |\n' "$name" "$number_width" "$number" "$votes_width" "$votes" "$status"
     fi
   done
-  print_rule "$name_width" "$number_width" "$votes_width"
+  print_rule "$name_width" "$number_width" "$votes_width" "$status_width"
 }
 
-readonly name_header="NOME" number_header="NÚMERO" votes_header="VOTOS"
+readonly name_header="NOME" number_header="NÚMERO" votes_header="VOTOS" status_header="SITUAÇÃO"
 
 # Recebe cargo e turno; devolve o código da eleição.
 election_for_cargo() {
@@ -125,6 +130,7 @@ load_municipalities() {
 # Consulta um cargo em um turno, em um município, e imprime sua tabela.
 show_cargo() {
   local municipio="$1" cargo="$2" turn="$3" election cargo_padded election_padded url file rows_file cargo_name status=0
+  local status_file="$tmp_dir/situacao-t$turn-c$cargo.json"
   local -a rows
   election="$(election_for_cargo "$cargo" "$turn")"
   file="$tmp_dir/cargo-$cargo.json"
@@ -143,23 +149,31 @@ show_cargo() {
     fail "resposta inválida para o cargo $cargo"; return 0
   fi
 
+  # A situação dos deputados (eleito, suplente...) só vem no arquivo da UF; baixado uma vez por cargo e turno.
+  if [[ ! -s "$status_file" ]]; then
+    fetch_json "$BASE_URL/ele$YEAR/$election/dados/$UF/${UF}-c${cargo_padded}-e${election_padded}-u.json" "$status_file" \
+      || { warn "situação dos candidatos do cargo $cargo indisponível"; printf '{}' >"$status_file"; }
+  fi
+
   cargo_name="$(jq -r --arg cargo "$cargo" 'first(.carg[] | select(.cd == $cargo) | .nmn) // empty' "$file")" || cargo_name=""
   if [[ -z "$cargo_name" ]]; then
     fail "cargo $cargo ausente na resposta"; return 0
   fi
   printf '\n%s (cargo %s)\n' "$cargo_name" "$cargo"
   rows_file="$tmp_dir/cargo-$cargo.tsv"
-  jq -r --arg cargo "$cargo" --argjson limit "$LIMIT" '
-    [
+  jq -r --arg cargo "$cargo" --argjson limit "$LIMIT" --slurpfile uf "$status_file" '
+    ($uf[0] | [.. | objects | .cand? // empty | .[] | select(.n != null) | {key: .n, value: .st}] | from_entries) as $status
+    | [
       .carg[] | select(.cd == $cargo)
       | .. | objects | .cand? // empty | .[]
       | select((.nmu // "") != "" and (.n // "") != "")
-      | { nome: (.nmu | gsub("[[:cntrl:]]"; " ")), numero: .n, votos: ((.vap // "0") | tonumber) }
+      | { nome: (.nmu | gsub("[[:cntrl:]]"; " ")), numero: .n, votos: ((.vap // "0") | tonumber),
+          situacao: (if (.dvt // "") | startswith("Anulado") then .dvt else ($status[.n] // .st // "") end) }
     ]
     | unique_by(.numero)
     | sort_by([-.votos, (.nome | ascii_downcase), .numero])
     | .[:$limit][]
-    | [.nome, .numero, (.votos | tostring)] | @tsv
+    | [.nome, .numero, (.votos | tostring), (if .situacao == "" then "-" else .situacao end)] | @tsv
   ' "$file" >"$rows_file" || { fail "não foi possível ler os candidatos do cargo $cargo"; return 0; }
   mapfile -t rows <"$rows_file"
   print_table rows
