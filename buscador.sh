@@ -9,7 +9,7 @@ readonly -a CARGOS_T2=(3 1)
 BASE_URL="${TSE_RESULTS_BASE_URL:-$DEFAULT_BASE_URL}"
 YEAR="${TSE_RESULTS_YEAR:-2026}"
 UF="${TSE_RESULTS_UF:-ma}"
-MUNICIPIO="${TSE_RESULTS_MUNICIPALITY:-07242}"
+MUNICIPIO="${TSE_RESULTS_MUNICIPALITY:-todos}"
 LIMIT="${TSE_RESULTS_LIMIT:-20}"
 FEDERAL_ELECTION="${TSE_RESULTS_FEDERAL_ELECTION:-6257}"
 STATE_ELECTION="${TSE_RESULTS_STATE_ELECTION:-6259}"
@@ -25,7 +25,7 @@ fail() { warn "$*"; failures=$((failures + 1)); }
 command -v curl >/dev/null || die "curl não encontrado"
 command -v jq >/dev/null || die "jq não encontrado"
 [[ "$UF" =~ ^[[:alpha:]]{2}$ ]] || die "TSE_RESULTS_UF deve conter duas letras"
-[[ "$MUNICIPIO" =~ ^[0-9]{5}$ ]] || die "TSE_RESULTS_MUNICIPALITY deve conter cinco dígitos"
+[[ "$MUNICIPIO" =~ ^([0-9]{5}|todos)$ ]] || die "TSE_RESULTS_MUNICIPALITY deve ser um código de cinco dígitos ou todos"
 [[ "$YEAR" =~ ^[0-9]{4}$ ]] || die "TSE_RESULTS_YEAR deve conter quatro dígitos"
 [[ "$LIMIT" =~ ^[1-9][0-9]*$ ]] || die "TSE_RESULTS_LIMIT deve ser um inteiro positivo"
 [[ "$FEDERAL_ELECTION" =~ ^[0-9]+$ && "$STATE_ELECTION" =~ ^[0-9]+$ ]] || die "códigos de eleição devem ser numéricos"
@@ -41,6 +41,8 @@ FEDERAL_ELECTION_T2=$((10#$FEDERAL_ELECTION_T2))
 STATE_ELECTION_T2=$((10#$STATE_ELECTION_T2))
 BASE_URL="${BASE_URL%/}"
 failures=0
+# Pares "turno-cargo" que o TSE respondeu não existir; evita repetir a consulta em cada município.
+declare -A missing=()
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
@@ -110,20 +112,31 @@ fetch_json() {
   esac
 }
 
-# Consulta um cargo em um turno e imprime sua tabela.
+# Grava em stdout "código<TAB>nome" de cada município da UF, usando a configuração do TSE.
+load_municipalities() {
+  local election_padded file="$tmp_dir/municipios.json"
+  printf -v election_padded '%06d' "$STATE_ELECTION"
+  fetch_json "$BASE_URL/ele$YEAR/$STATE_ELECTION/config/mun-e${election_padded}-cm.json" "$file" \
+    || die "não foi possível obter a lista de municípios"
+  jq -r --arg uf "$UF" '.abr[] | select(.cd == $uf) | .mu[] | [.cd, .nm] | @tsv' "$file" \
+    || die "lista de municípios inválida"
+}
+
+# Consulta um cargo em um turno, em um município, e imprime sua tabela.
 show_cargo() {
-  local cargo="$1" turn="$2" election cargo_padded election_padded url file rows_file cargo_name status=0
+  local municipio="$1" cargo="$2" turn="$3" election cargo_padded election_padded url file rows_file cargo_name status=0
   local -a rows
   election="$(election_for_cargo "$cargo" "$turn")"
   file="$tmp_dir/cargo-$cargo.json"
   printf -v cargo_padded '%04d' "$cargo"
   printf -v election_padded '%06d' "$election"
-  url="$BASE_URL/ele$YEAR/$election/dados/$UF/${UF}${MUNICIPIO}-c${cargo_padded}-e${election_padded}-u.json"
+  [[ -v "missing[$turn-$cargo]" ]] && return 0
+  url="$BASE_URL/ele$YEAR/$election/dados/$UF/${UF}${municipio}-c${cargo_padded}-e${election_padded}-u.json"
 
   fetch_json "$url" "$file" || status=$?
   case "$status" in
     0) ;;
-    2) warn "o TSE não tem dados do cargo $cargo no ${turn}º turno"; return 0 ;;
+    2) warn "o TSE não tem dados do cargo $cargo no ${turn}º turno"; missing[$turn-$cargo]=1; return 0 ;;
     *) fail "falha ao consultar o cargo $cargo ($url)"; return 0 ;;
   esac
   if ! jq -e '.carg | type == "array"' "$file" >/dev/null 2>&1; then
@@ -157,11 +170,23 @@ case "$TURN" in
   *) turns=("$TURN") ;;
 esac
 
-for turn in "${turns[@]}"; do
-  printf '\n===== %sº turno =====\n' "$turn"
-  if (( turn == 1 )); then cargos=("${CARGOS[@]}"); else cargos=("${CARGOS_T2[@]}"); fi
-  for cargo in "${cargos[@]}"; do
-    show_cargo "$cargo" "$turn"
+load_municipalities >"$tmp_dir/municipios.tsv"
+if [[ "$MUNICIPIO" != todos ]]; then
+  grep "^$MUNICIPIO"$'\t' "$tmp_dir/municipios.tsv" >"$tmp_dir/selecionados.tsv" \
+    || die "município $MUNICIPIO não encontrado em ${UF^^}"
+  mv "$tmp_dir/selecionados.tsv" "$tmp_dir/municipios.tsv"
+fi
+mapfile -t municipalities <"$tmp_dir/municipios.tsv"
+
+for entry in "${municipalities[@]}"; do
+  IFS=$'\t' read -r municipio municipio_name <<<"$entry"
+  printf '\n######## %s (%s) - %s ########\n' "$municipio_name" "$municipio" "${UF^^}"
+  for turn in "${turns[@]}"; do
+    printf '\n===== %sº turno =====\n' "$turn"
+    if (( turn == 1 )); then cargos=("${CARGOS[@]}"); else cargos=("${CARGOS_T2[@]}"); fi
+    for cargo in "${cargos[@]}"; do
+      show_cargo "$municipio" "$cargo" "$turn"
+    done
   done
 done
 
