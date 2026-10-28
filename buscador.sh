@@ -14,6 +14,9 @@ STATE_ELECTION="${TSE_RESULTS_STATE_ELECTION:-6259}"
 COLOR_MODE="${TSE_RESULTS_COLOR:-auto}"
 
 die() { printf 'Erro: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'Aviso: %s\n' "$*" >&2; }
+# Registra uma falha sem interromper os demais cargos.
+fail() { warn "$*"; failures=$((failures + 1)); }
 command -v curl >/dev/null || die "curl não encontrado"
 command -v jq >/dev/null || die "jq não encontrado"
 [[ "$UF" =~ ^[[:alpha:]]{2}$ ]] || die "TSE_RESULTS_UF deve conter duas letras"
@@ -28,6 +31,7 @@ UF="${UF,,}"
 FEDERAL_ELECTION=$((10#$FEDERAL_ELECTION))
 STATE_ELECTION=$((10#$STATE_ELECTION))
 BASE_URL="${BASE_URL%/}"
+failures=0
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
@@ -81,9 +85,22 @@ election_for_cargo() {
   esac
 }
 
+# Baixa a URL para o arquivo. Retorna 0 (ok), 2 (TSE ainda não tem o arquivo) ou 1 (falha).
+fetch_json() {
+  local url="$1" output="$2" http_code
+  http_code="$(curl --silent --show-error --location \
+    --retry 3 --connect-timeout 10 --max-time 30 \
+    --output "$output" --write-out '%{http_code}' "$url")" || return 1
+  case "$http_code" in
+    200) return 0 ;;
+    403|404) return 2 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Consulta um cargo e imprime sua tabela.
 show_cargo() {
-  local cargo="$1" election cargo_padded election_padded url file rows_file cargo_name
+  local cargo="$1" election cargo_padded election_padded url file rows_file cargo_name status=0
   local -a rows
   election="$(election_for_cargo "$cargo")"
   file="$tmp_dir/cargo-$cargo.json"
@@ -91,13 +108,20 @@ show_cargo() {
   printf -v election_padded '%06d' "$election"
   url="$BASE_URL/ele$YEAR/$election/dados/$UF/${UF}${MUNICIPIO}-c${cargo_padded}-e${election_padded}-u.json"
 
-  curl --fail --silent --show-error --location \
-    --retry 3 --retry-all-errors --connect-timeout 10 --max-time 30 \
-    --output "$file" "$url" || die "falha ao consultar o cargo $cargo"
-  jq -e '.carg | type == "array"' "$file" >/dev/null || die "resposta inválida para o cargo $cargo"
+  fetch_json "$url" "$file" || status=$?
+  case "$status" in
+    0) ;;
+    2) warn "o TSE não tem dados do cargo $cargo para esta consulta"; return 0 ;;
+    *) fail "falha ao consultar o cargo $cargo ($url)"; return 0 ;;
+  esac
+  if ! jq -e '.carg | type == "array"' "$file" >/dev/null 2>&1; then
+    fail "resposta inválida para o cargo $cargo"; return 0
+  fi
 
-  cargo_name="$(jq -r --arg cargo "$cargo" '.carg[] | select(.cd == $cargo) | .nmn' "$file" | head -n 1)"
-  [[ -n "$cargo_name" ]] || die "cargo $cargo ausente na resposta"
+  cargo_name="$(jq -r --arg cargo "$cargo" 'first(.carg[] | select(.cd == $cargo) | .nmn) // empty' "$file")" || cargo_name=""
+  if [[ -z "$cargo_name" ]]; then
+    fail "cargo $cargo ausente na resposta"; return 0
+  fi
   printf '\n%s (cargo %s)\n' "$cargo_name" "$cargo"
   rows_file="$tmp_dir/cargo-$cargo.tsv"
   jq -r --arg cargo "$cargo" --argjson limit "$LIMIT" '
@@ -111,7 +135,7 @@ show_cargo() {
     | sort_by([-.votos, (.nome | ascii_downcase), .numero])
     | .[:$limit][]
     | [.nome, .numero, (.votos | tostring)] | @tsv
-  ' "$file" >"$rows_file"
+  ' "$file" >"$rows_file" || { fail "não foi possível ler os candidatos do cargo $cargo"; return 0; }
   mapfile -t rows <"$rows_file"
   print_table rows
 }
@@ -119,3 +143,5 @@ show_cargo() {
 for cargo in "${CARGOS[@]}"; do
   show_cargo "$cargo"
 done
+
+(( failures == 0 )) || die "$failures consulta(s) falharam; veja os avisos acima"
