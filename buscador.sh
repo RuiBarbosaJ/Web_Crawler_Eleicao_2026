@@ -3,6 +3,8 @@ set -Eeuo pipefail
 
 readonly DEFAULT_BASE_URL="https://resultados.tse.jus.br/oficial"
 readonly -a CARGOS=(6 7 5 3 1)
+# Só Governador e Presidente podem ter 2º turno.
+readonly -a CARGOS_T2=(3 1)
 
 BASE_URL="${TSE_RESULTS_BASE_URL:-$DEFAULT_BASE_URL}"
 YEAR="${TSE_RESULTS_YEAR:-2026}"
@@ -11,6 +13,9 @@ MUNICIPIO="${TSE_RESULTS_MUNICIPALITY:-07242}"
 LIMIT="${TSE_RESULTS_LIMIT:-20}"
 FEDERAL_ELECTION="${TSE_RESULTS_FEDERAL_ELECTION:-6257}"
 STATE_ELECTION="${TSE_RESULTS_STATE_ELECTION:-6259}"
+FEDERAL_ELECTION_T2="${TSE_RESULTS_FEDERAL_ELECTION_T2:-6258}"
+STATE_ELECTION_T2="${TSE_RESULTS_STATE_ELECTION_T2:-6260}"
+TURN="${TSE_RESULTS_TURN:-ambos}"
 COLOR_MODE="${TSE_RESULTS_COLOR:-auto}"
 
 die() { printf 'Erro: %s\n' "$*" >&2; exit 1; }
@@ -24,12 +29,16 @@ command -v jq >/dev/null || die "jq não encontrado"
 [[ "$YEAR" =~ ^[0-9]{4}$ ]] || die "TSE_RESULTS_YEAR deve conter quatro dígitos"
 [[ "$LIMIT" =~ ^[1-9][0-9]*$ ]] || die "TSE_RESULTS_LIMIT deve ser um inteiro positivo"
 [[ "$FEDERAL_ELECTION" =~ ^[0-9]+$ && "$STATE_ELECTION" =~ ^[0-9]+$ ]] || die "códigos de eleição devem ser numéricos"
+[[ "$FEDERAL_ELECTION_T2" =~ ^[0-9]+$ && "$STATE_ELECTION_T2" =~ ^[0-9]+$ ]] || die "códigos de eleição do 2º turno devem ser numéricos"
+[[ "$TURN" =~ ^(1|2|ambos)$ ]] || die "TSE_RESULTS_TURN deve ser 1, 2 ou ambos"
 [[ "$COLOR_MODE" =~ ^(auto|always|never)$ ]] || die "TSE_RESULTS_COLOR deve ser auto, always ou never"
 
 UF="${UF,,}"
 # Base 10 explícita: sem isso, "0544" seria lido como octal.
 FEDERAL_ELECTION=$((10#$FEDERAL_ELECTION))
 STATE_ELECTION=$((10#$STATE_ELECTION))
+FEDERAL_ELECTION_T2=$((10#$FEDERAL_ELECTION_T2))
+STATE_ELECTION_T2=$((10#$STATE_ELECTION_T2))
 BASE_URL="${BASE_URL%/}"
 failures=0
 tmp_dir="$(mktemp -d)"
@@ -77,11 +86,14 @@ print_table() {
 
 readonly name_header="NOME" number_header="NÚMERO" votes_header="VOTOS"
 
+# Recebe cargo e turno; devolve o código da eleição.
 election_for_cargo() {
-  case "$1" in
-    1) printf '%s' "$FEDERAL_ELECTION" ;;
-    3|5|6|7) printf '%s' "$STATE_ELECTION" ;;
-    *) die "cargo não suportado: $1" ;;
+  case "$1-$2" in
+    1-1) printf '%s' "$FEDERAL_ELECTION" ;;
+    1-2) printf '%s' "$FEDERAL_ELECTION_T2" ;;
+    [3567]-1) printf '%s' "$STATE_ELECTION" ;;
+    3-2) printf '%s' "$STATE_ELECTION_T2" ;;
+    *) die "cargo $1 não suportado no ${2}º turno" ;;
   esac
 }
 
@@ -98,11 +110,11 @@ fetch_json() {
   esac
 }
 
-# Consulta um cargo e imprime sua tabela.
+# Consulta um cargo em um turno e imprime sua tabela.
 show_cargo() {
-  local cargo="$1" election cargo_padded election_padded url file rows_file cargo_name status=0
+  local cargo="$1" turn="$2" election cargo_padded election_padded url file rows_file cargo_name status=0
   local -a rows
-  election="$(election_for_cargo "$cargo")"
+  election="$(election_for_cargo "$cargo" "$turn")"
   file="$tmp_dir/cargo-$cargo.json"
   printf -v cargo_padded '%04d' "$cargo"
   printf -v election_padded '%06d' "$election"
@@ -111,7 +123,7 @@ show_cargo() {
   fetch_json "$url" "$file" || status=$?
   case "$status" in
     0) ;;
-    2) warn "o TSE não tem dados do cargo $cargo para esta consulta"; return 0 ;;
+    2) warn "o TSE não tem dados do cargo $cargo no ${turn}º turno"; return 0 ;;
     *) fail "falha ao consultar o cargo $cargo ($url)"; return 0 ;;
   esac
   if ! jq -e '.carg | type == "array"' "$file" >/dev/null 2>&1; then
@@ -140,8 +152,17 @@ show_cargo() {
   print_table rows
 }
 
-for cargo in "${CARGOS[@]}"; do
-  show_cargo "$cargo"
+case "$TURN" in
+  ambos) turns=(1 2) ;;
+  *) turns=("$TURN") ;;
+esac
+
+for turn in "${turns[@]}"; do
+  printf '\n===== %sº turno =====\n' "$turn"
+  if (( turn == 1 )); then cargos=("${CARGOS[@]}"); else cargos=("${CARGOS_T2[@]}"); fi
+  for cargo in "${cargos[@]}"; do
+    show_cargo "$cargo" "$turn"
+  done
 done
 
 (( failures == 0 )) || die "$failures consulta(s) falharam; veja os avisos acima"
